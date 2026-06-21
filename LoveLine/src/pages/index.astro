@@ -1,0 +1,53 @@
+---
+import '../styles/global.css';
+---
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="LoveLine - timeline minimalista de relacionamentos." />
+    <title>LoveLine</title>
+  </head>
+  <body>
+    <main id="app" class="app blurred">
+      <canvas id="timelineCanvas" aria-label="Linha do tempo LoveLine"></canvas>
+
+      <section id="introOverlay" class="intro-overlay" aria-label="Tela inicial LoveLine">
+        <div class="intro-card">
+          <h1>LoveLine</h1>
+          <p>arraste um arquivo de loveline ou clique na tela para começar uma do 0</p>
+        </div>
+      </section>
+
+      <button id="homeBtn" class="round-btn top-left" type="button" title="Voltar para início" aria-label="Voltar para início">
+        <span>⌂</span>
+      </button>
+
+      <div class="people-menu" aria-label="Menu de pessoas">
+        <button id="peopleBtn" class="round-btn top-right" type="button" title="Pessoas" aria-label="Pessoas">
+          <span>👥</span>
+        </button>
+        <div id="peopleDropdown" class="people-dropdown" aria-label="Pessoas cadastradas"></div>
+      </div>
+
+      <button id="downloadBtn" class="round-btn bottom-left" type="button" title="Baixar .ll" aria-label="Baixar .ll">
+        <span>⇩</span>
+      </button>
+
+      <button id="playBtn" class="round-btn bottom-right" type="button" title="Reproduzir timeline" aria-label="Reproduzir timeline">
+        <span>▶</span>
+      </button>
+
+      <aside id="sidePanel" class="side-panel" aria-label="Painel lateral">
+        <div id="panelContent" class="panel-content"></div>
+      </aside>
+
+      <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    </main>
+
+    <script>
+      import '../scripts/loveline.js';
+    </script>
+  </body>
+</html>
