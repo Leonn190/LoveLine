@@ -1,4 +1,4 @@
-import JSZip from 'jszip';
+const JSZip = window.JSZip;
 
 const DAY = 24 * 60 * 60 * 1000;
 const DEFAULT_METRICS = [

@@ -1,11 +1,11 @@
 # LoveLine
 
-Site em Astro, CSS e JavaScript para criar uma timeline minimalista de relacionamentos.
+Timeline minimalista de relacionamentos feita em Astro, CSS e JavaScript.
 
 ## Rodar localmente
 
 ```bash
-npm install
+npm install --no-package-lock --no-audit --no-fund
 npm run dev
 ```
 
@@ -13,28 +13,22 @@ npm run dev
 
 ```bash
 npm run build
-npm run preview
 ```
 
 ## GitHub Pages
 
-O projeto está configurado para rodar em:
+O deploy está configurado no mesmo padrão do repositório `Blood`:
+
+- Astro em projeto na raiz do repo.
+- `astro.config.mjs` com `site` e `base: '/LoveLine'`.
+- GitHub Actions com Node `22.12.0`.
+- `actions/configure-pages@v5` antes do build.
+- `rm -f package-lock.json` antes do install para ignorar locks antigos quebrados.
+
+No GitHub, deixe **Settings > Pages > Source** como **GitHub Actions**.
+
+URL esperada:
 
 ```txt
 https://leonn190.github.io/LoveLine/
 ```
-
-Configuração importante:
-
-- `astro.config.mjs` usa `site: 'https://leonn190.github.io'` e `base: '/LoveLine'`.
-- `.github/workflows/deploy.yml` usa GitHub Actions com Node 24.
-- Em `Settings > Pages`, o Source deve ficar como `GitHub Actions`.
-
-## Arquivos `.ll`
-
-O botão de download gera um arquivo `.ll`, que é um `.zip` contendo:
-
-- `data/loveline.json` com pessoas, eventos, períodos e estado da câmera.
-- `images/...` com fotos usadas na LoveLine.
-
-Na tela inicial, arraste um `.ll` para importar ou clique para começar do zero.
