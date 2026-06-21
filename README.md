@@ -16,6 +16,18 @@ npm run build
 npm run preview
 ```
 
+## Deploy no GitHub Pages
+
+Este projeto já vem com `.github/workflows/deploy.yml` configurado.
+
+No GitHub, vá em:
+
+`Settings` > `Pages` > `Build and deployment` > `Source` > `GitHub Actions`
+
+Depois faça commit/push na branch `main`. O site deve sair em:
+
+`https://leonn190.github.io/LoveLine/`
+
 ## Arquivos `.ll`
 
 O botão de download gera um arquivo `.ll`, que é um `.zip` contendo:
