@@ -18,7 +18,7 @@ npm run preview
 
 ## Deploy no GitHub Pages
 
-Este projeto já vem com `.github/workflows/deploy.yml` configurado.
+Este projeto já vem com `.github/workflows/deploy.yml` configurado para GitHub Actions.
 
 No GitHub, vá em:
 
@@ -27,6 +27,8 @@ No GitHub, vá em:
 Depois faça commit/push na branch `main`. O site deve sair em:
 
 `https://leonn190.github.io/LoveLine/`
+
+Importante: esta versão não usa `npm ci`, porque o lock antigo podia quebrar no GitHub Actions. O deploy instala pelas dependências públicas do `package.json`.
 
 ## Arquivos `.ll`
 
