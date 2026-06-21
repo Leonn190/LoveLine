@@ -10,8 +10,8 @@
     "preview": "astro preview"
   },
   "dependencies": {
-    "astro": "6.4.8",
-    "jszip": "3.10.1"
+    "astro": "^6.4.8",
+    "jszip": "^3.10.1"
   },
   "devDependencies": {}
 }

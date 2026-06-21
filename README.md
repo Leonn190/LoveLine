@@ -16,19 +16,19 @@ npm run build
 npm run preview
 ```
 
-## Deploy no GitHub Pages
+## GitHub Pages
 
-Este projeto já vem com `.github/workflows/deploy.yml` configurado para GitHub Actions.
+O projeto está configurado para rodar em:
 
-No GitHub, vá em:
+```txt
+https://leonn190.github.io/LoveLine/
+```
 
-`Settings` > `Pages` > `Build and deployment` > `Source` > `GitHub Actions`
+Configuração importante:
 
-Depois faça commit/push na branch `main`. O site deve sair em:
-
-`https://leonn190.github.io/LoveLine/`
-
-Importante: esta versão não usa `npm ci`, porque o lock antigo podia quebrar no GitHub Actions. O deploy instala pelas dependências públicas do `package.json`.
+- `astro.config.mjs` usa `site: 'https://leonn190.github.io'` e `base: '/LoveLine'`.
+- `.github/workflows/deploy.yml` usa GitHub Actions com Node 24.
+- Em `Settings > Pages`, o Source deve ficar como `GitHub Actions`.
 
 ## Arquivos `.ll`
 
