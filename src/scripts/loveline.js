@@ -51,7 +51,9 @@ const state = {
   highlighted: null,
   playTimer: null,
   playIndex: 0,
-  playMoments: []
+  playMoments: [],
+  zoomPreset: null,
+  suppressNextClick: false
 };
 
 const els = {
@@ -60,6 +62,7 @@ const els = {
   intro: document.getElementById('introOverlay'),
   peopleBtn: document.getElementById('peopleBtn'),
   peopleDropdown: document.getElementById('peopleDropdown'),
+  zoomControls: document.getElementById('zoomControls'),
   homeBtn: document.getElementById('homeBtn'),
   downloadBtn: document.getElementById('downloadBtn'),
   playBtn: document.getElementById('playBtn'),
@@ -70,6 +73,7 @@ const els = {
 
 const ctx = els.canvas.getContext('2d');
 let rafId = 0;
+let itemLayouts = new Map();
 let canvasRect = els.canvas.getBoundingClientRect();
 
 boot();
@@ -120,6 +124,14 @@ function bindEvents() {
   els.downloadBtn.addEventListener('click', exportLoveline);
   els.playBtn.addEventListener('click', playTimeline);
 
+  els.zoomControls?.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-zoom-preset]');
+    if (!button) return;
+    startEditing();
+    stopPlayback();
+    setZoomPreset(button.dataset.zoomPreset);
+  });
+
   els.canvas.addEventListener('pointerdown', handleCanvasPointerDown);
   els.canvas.addEventListener('pointermove', handleCanvasPointerMove);
   els.canvas.addEventListener('pointerup', handleCanvasPointerUp);
@@ -130,6 +142,14 @@ function bindEvents() {
   document.addEventListener('pointerup', handleGlobalPointerUp);
 
   document.addEventListener('click', (event) => {
+    if (!state.suppressNextClick) return;
+    event.preventDefault();
+    event.stopPropagation();
+    state.suppressNextClick = false;
+  }, true);
+
+  document.addEventListener('click', (event) => {
+    if (state.dragPerson) return;
     if (!event.target.closest('.people-menu')) closePeopleDropdown();
   });
 }
@@ -291,8 +311,8 @@ function drawTick(x, lineY, size, color) {
   ctx.strokeStyle = color;
   ctx.lineWidth = size > 30 ? 2 : 1;
   ctx.beginPath();
-  ctx.moveTo(x, lineY - size);
-  ctx.lineTo(x, lineY + size);
+  ctx.moveTo(x, lineY + 8);
+  ctx.lineTo(x, lineY + 8 + size);
   ctx.stroke();
 }
 
@@ -302,83 +322,198 @@ function drawLabel(x, y, text) {
 }
 
 function drawItems(lineY) {
-  const sorted = [...state.items].sort((a, b) => (a.endMs || a.startMs) - (b.endMs || b.startMs));
+  itemLayouts = computeItemLayouts(lineY);
+  const sorted = [...state.items].sort((a, b) => (a.startMs || 0) - (b.startMs || 0));
   for (const item of sorted) {
-    if (item.type === 'period') drawPeriod(item, lineY);
+    if (item.type === 'period') drawPeriod(item, lineY, itemLayouts.get(item.id));
   }
   for (const item of sorted) {
-    if (item.type === 'event') drawEvent(item, lineY);
+    if (item.type === 'event') drawEvent(item, lineY, itemLayouts.get(item.id));
   }
 }
 
-function drawPeriod(item, lineY) {
-  const x1 = dateToScreen(item.startMs);
-  const x2 = dateToScreen(item.endMs || item.startMs);
-  const left = Math.min(x1, x2);
-  const width = Math.max(26, Math.abs(x2 - x1));
-  if (left > canvasRect.width + 120 || left + width < -120) return;
+function computeItemLayouts(lineY = getLineY()) {
+  const layouts = new Map();
+  const periods = state.items
+    .filter((item) => item.type === 'period')
+    .sort((a, b) => Math.min(a.startMs, a.endMs || a.startMs) - Math.min(b.startMs, b.endMs || b.startMs));
+  const laneEnds = [];
+
+  for (const item of periods) {
+    const rawX1 = dateToScreen(item.startMs);
+    const rawX2 = dateToScreen(item.endMs || item.startMs);
+    const centerX = (rawX1 + rawX2) / 2;
+    const visualWidth = Math.max(42, Math.abs(rawX2 - rawX1));
+    const left = centerX - visualWidth / 2;
+    const right = centerX + visualWidth / 2;
+    const start = Math.min(item.startMs, item.endMs || item.startMs);
+    const end = Math.max(item.startMs, item.endMs || item.startMs);
+    let lane = 0;
+    while (laneEnds[lane] != null && laneEnds[lane] >= start - DAY * 0.25) lane += 1;
+    laneEnds[lane] = Math.max(laneEnds[lane] || -Infinity, end);
+    const y = lineY - 84 - lane * 34;
+    const height = 24;
+    layouts.set(item.id, {
+      type: 'period',
+      lane,
+      x1: rawX1,
+      x2: rawX2,
+      left,
+      right,
+      y,
+      height,
+      top: y - 16,
+      bottom: lineY + 12
+    });
+  }
+
+  const eventSlots = [];
+  const events = state.items
+    .filter((item) => item.type === 'event')
+    .sort((a, b) => a.startMs - b.startMs);
+
+  for (const item of events) {
+    const x = dateToScreen(item.startMs);
+    const containingPeriodLanes = [];
+    for (const period of periods) {
+      const start = Math.min(period.startMs, period.endMs || period.startMs);
+      const end = Math.max(period.startMs, period.endMs || period.startMs);
+      if (item.startMs >= start && item.startMs <= end) {
+        const layout = layouts.get(period.id);
+        if (layout) containingPeriodLanes.push(layout.lane);
+      }
+    }
+
+    let lane = containingPeriodLanes.length ? Math.max(...containingPeriodLanes) + 1 : 0;
+    while (eventSlots.some((slot) => slot.lane === lane && Math.abs(slot.x - x) < 48)) lane += 1;
+    eventSlots.push({ lane, x });
+
+    const insidePeriod = containingPeriodLanes.length > 0;
+    const y = lineY - (insidePeriod ? 124 : 88) - lane * 30;
+    const r = isHighlighted(item.id) ? 21 : 16;
+    layouts.set(item.id, {
+      type: 'event',
+      lane,
+      x,
+      y,
+      r,
+      insidePeriod,
+      left: x - r - 12,
+      right: x + r + 12,
+      top: y - r - 28,
+      bottom: lineY + 12
+    });
+  }
+
+  return layouts;
+}
+
+function drawPeriod(item, lineY, layout) {
+  if (!layout) return;
+  if (layout.left > canvasRect.width + 140 || layout.right < -140) return;
 
   const person = getPerson(item.personId);
-  const colors = person ? person.colors : ['#a7a7a7', '#d8d8d8'];
+  const colors = person ? person.colors : ['#b5b5b5', '#dddddd'];
   const isHot = state.hoverItemId === item.id || isHighlighted(item.id);
-  const y = lineY - (isHot ? 20 : 16);
-  const height = isHot ? 40 : 32;
-  const gradient = ctx.createLinearGradient(left, y, left + width, y + height);
+  const y = layout.y - (isHot ? 3 : 0);
+  const height = isHot ? layout.height + 4 : layout.height;
+  const left = layout.left;
+  const right = layout.right;
+  const width = Math.max(42, right - left);
+  const midY = y + height / 2;
+  const gradient = ctx.createLinearGradient(left, y, right, y + height);
   gradient.addColorStop(0, colors[0]);
   gradient.addColorStop(1, colors[1]);
 
   ctx.save();
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = person ? `${colors[0]}aa` : 'rgba(160,160,160,0.62)';
+  ctx.lineWidth = isHot ? 3 : 2;
+  ctx.beginPath();
+  ctx.moveTo(layout.x1, lineY - 2);
+  ctx.lineTo(layout.x1, midY);
+  ctx.moveTo(layout.x2, lineY - 2);
+  ctx.lineTo(layout.x2, midY);
+  ctx.stroke();
+
   ctx.shadowColor = person ? `${colors[0]}55` : 'rgba(130,130,130,0.20)';
-  ctx.shadowBlur = isHot ? 24 : 13;
+  ctx.shadowBlur = isHot ? 26 : 14;
   ctx.fillStyle = gradient;
   roundRect(ctx, left, y, width, height, 999);
   ctx.fill();
-  ctx.strokeStyle = 'rgba(255,255,255,0.88)';
+  ctx.strokeStyle = 'rgba(255,255,255,0.90)';
   ctx.lineWidth = 2;
   ctx.stroke();
 
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = 'rgba(255,255,255,0.92)';
+  for (const knobX of [layout.x1, layout.x2]) {
+    ctx.beginPath();
+    ctx.arc(knobX, midY, isHot ? 5 : 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
   if (item.title) {
-    ctx.fillStyle = person ? '#ffffff' : '#fff';
-    ctx.font = '700 13px Inter, system-ui, sans-serif';
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '800 12px Inter, system-ui, sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(clipText(item.title, Math.max(40, width - 18)), left + width / 2, y + height / 2);
+    ctx.fillText(clipText(item.title, Math.max(34, width - 18)), left + width / 2, midY);
   }
   ctx.restore();
 }
 
-function drawEvent(item, lineY) {
-  const x = dateToScreen(item.startMs);
-  if (x < -80 || x > canvasRect.width + 80) return;
+function drawEvent(item, lineY, layout) {
+  if (!layout) return;
+  const x = layout.x;
+  if (x < -90 || x > canvasRect.width + 90) return;
   const person = getPerson(item.personId);
   const colors = person ? person.colors : ['#a7a7a7', '#d8d8d8'];
   const isHot = state.hoverItemId === item.id || isHighlighted(item.id);
-  const r = isHot ? 18 : 14;
-  const gradient = ctx.createLinearGradient(x - r, lineY - r, x + r, lineY + r);
+  const r = isHot ? 22 : layout.r;
+  const y = layout.y - (isHot ? 6 : 0);
+  const gradient = ctx.createLinearGradient(x - r, y - r, x + r, y + r);
   gradient.addColorStop(0, colors[0]);
   gradient.addColorStop(1, colors[1]);
 
   ctx.save();
-  ctx.shadowColor = person ? `${colors[0]}55` : 'rgba(130,130,130,0.20)';
-  ctx.shadowBlur = isHot ? 24 : 13;
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = person ? `${colors[0]}aa` : 'rgba(165,165,165,0.70)';
+  ctx.lineWidth = isHot ? 3 : 2;
+  ctx.beginPath();
+  ctx.moveTo(x, lineY - 2);
+  ctx.lineTo(x, y + r - 1);
+  ctx.stroke();
+
+  ctx.shadowColor = person ? `${colors[0]}66` : 'rgba(130,130,130,0.20)';
+  ctx.shadowBlur = isHot ? 28 : 14;
   ctx.fillStyle = gradient;
   ctx.beginPath();
-  ctx.arc(x, lineY, r, 0, Math.PI * 2);
+  ctx.arc(x, y, r, 0, Math.PI * 2);
   ctx.fill();
-  ctx.strokeStyle = 'rgba(255,255,255,0.92)';
+  ctx.strokeStyle = 'rgba(255,255,255,0.94)';
   ctx.lineWidth = 3;
   ctx.stroke();
 
   const icon = getAsset(item.iconImageId);
-  if (icon) drawImageInCircle(icon.dataUrl, x, lineY, r - 2);
+  if (icon) {
+    drawImageInCircle(icon.dataUrl, x, y, r - 3);
+  } else {
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#ffffff';
+    ctx.font = `${isHot ? 20 : 16}px Inter, system-ui, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('♡', x, y + 1);
+  }
 
   if (item.title) {
     ctx.shadowBlur = 0;
-    ctx.fillStyle = '#876172';
-    ctx.font = '700 12px Inter, system-ui, sans-serif';
+    ctx.fillStyle = '#6f4d5d';
+    ctx.font = '800 12px Inter, system-ui, sans-serif';
     ctx.textAlign = 'center';
-    ctx.textBaseline = 'top';
-    ctx.fillText(clipText(item.title, 120), x, lineY + r + 8);
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(clipText(item.title, 126), x, y - r - 8);
   }
   ctx.restore();
 }
@@ -389,11 +524,20 @@ function drawDraftPeriod(lineY) {
   const x2 = state.pointer.x;
   const left = Math.min(x1, x2);
   const width = Math.max(12, Math.abs(x2 - x1));
+  const y = lineY - 84;
   ctx.save();
   ctx.setLineDash([8, 6]);
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = 'rgba(150, 150, 150, 0.72)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(x1, lineY - 2);
+  ctx.lineTo(x1, y + 12);
+  ctx.moveTo(x2, lineY - 2);
+  ctx.lineTo(x2, y + 12);
+  ctx.stroke();
   ctx.fillStyle = 'rgba(170, 170, 170, 0.22)';
-  ctx.strokeStyle = 'rgba(150, 150, 150, 0.75)';
-  roundRect(ctx, left, lineY - 17, width, 34, 999);
+  roundRect(ctx, left, y, width, 24, 999);
   ctx.fill();
   ctx.stroke();
   ctx.restore();
@@ -401,30 +545,97 @@ function drawDraftPeriod(lineY) {
 
 function drawPlaybackLabel(lineY) {
   if (!state.highlighted) return;
+
+  if (state.highlighted.kind === 'person') {
+    drawPlaybackPersonCard(state.highlighted, lineY);
+    return;
+  }
+
   const { itemId, label, ms } = state.highlighted;
   const item = state.items.find((entry) => entry.id === itemId);
   if (!item) return;
+  const layout = itemLayouts.get(itemId) || computeItemLayouts(lineY).get(itemId);
   const x = dateToScreen(ms);
-  const y = lineY - 92;
-  const text = item.title || (item.type === 'period' ? 'Período' : 'Evento');
-  const subtitle = `${label} • ${formatDate(ms)}`;
-  const width = Math.min(320, Math.max(170, ctx.measureText(text).width + 58));
+  const y = Math.max(82, (layout?.top || lineY - 120) - 76);
+  const title = item.title || (item.type === 'period' ? 'Período' : 'Evento');
+  const person = getPerson(item.personId);
+  const subtitle = `${label} • ${formatDate(ms)}${person ? ` • ${personLabel(person)}` : ''}`;
   ctx.save();
-  ctx.fillStyle = 'rgba(255,255,255,0.92)';
-  ctx.strokeStyle = 'rgba(255, 169, 202, 0.62)';
-  ctx.shadowColor = 'rgba(255, 120, 176, 0.20)';
-  ctx.shadowBlur = 20;
-  roundRect(ctx, clamp(x - width / 2, 20, canvasRect.width - width - 20), y, width, 60, 22);
+  ctx.font = '800 15px Inter, system-ui, sans-serif';
+  const width = Math.min(360, Math.max(190, ctx.measureText(title).width + 72));
+  const left = clamp(x - width / 2, 20, canvasRect.width - width - 20);
+  ctx.fillStyle = 'rgba(255,255,255,0.94)';
+  ctx.strokeStyle = 'rgba(255, 169, 202, 0.68)';
+  ctx.shadowColor = 'rgba(255, 120, 176, 0.24)';
+  ctx.shadowBlur = 22;
+  roundRect(ctx, left, y, width, 64, 22);
   ctx.fill();
   ctx.stroke();
   ctx.shadowBlur = 0;
   ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
   ctx.fillStyle = '#3f2631';
-  ctx.font = '800 15px Inter, system-ui, sans-serif';
-  ctx.fillText(clipText(text, width - 28), clamp(x, 20 + width / 2, canvasRect.width - width / 2 - 20), y + 16);
+  ctx.fillText(clipText(title, width - 28), left + width / 2, y + 23);
   ctx.fillStyle = '#9b7888';
   ctx.font = '700 12px Inter, system-ui, sans-serif';
-  ctx.fillText(subtitle, clamp(x, 20 + width / 2, canvasRect.width - width / 2 - 20), y + 36);
+  ctx.fillText(clipText(subtitle, width - 28), left + width / 2, y + 45);
+  ctx.restore();
+}
+
+function drawPlaybackPersonCard(moment, lineY) {
+  const person = getPerson(moment.personId);
+  if (!person) return;
+  const x = clamp(dateToScreen(moment.ms), 150, canvasRect.width - 150);
+  const y = Math.max(78, lineY - 250);
+  const width = 300;
+  const height = 98;
+  const left = clamp(x - width / 2, 20, canvasRect.width - width - 20);
+  const profile = getAsset(person.profileImageId);
+  ctx.save();
+  ctx.fillStyle = 'rgba(255,255,255,0.95)';
+  ctx.strokeStyle = `${person.colors?.[0] || '#ff82b2'}70`;
+  ctx.shadowColor = `${person.colors?.[0] || '#ff82b2'}40`;
+  ctx.shadowBlur = 26;
+  roundRect(ctx, left, y, width, height, 28);
+  ctx.fill();
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  const avatarX = left + 50;
+  const avatarY = y + 49;
+  const avatarR = 31;
+  const colors = person.colors || ['#ff82b2', '#ffc9df'];
+  const gradientFill = ctx.createLinearGradient(avatarX - avatarR, avatarY - avatarR, avatarX + avatarR, avatarY + avatarR);
+  gradientFill.addColorStop(0, colors[0]);
+  gradientFill.addColorStop(1, colors[1]);
+  ctx.fillStyle = gradientFill;
+  ctx.beginPath();
+  ctx.arc(avatarX, avatarY, avatarR, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  if (profile) drawImageInCircle(profile.dataUrl, avatarX, avatarY, avatarR - 3);
+  else {
+    ctx.fillStyle = '#fff';
+    ctx.font = '850 20px Inter, system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(initials(personLabel(person)), avatarX, avatarY + 1);
+  }
+
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = '#3f2631';
+  ctx.font = '850 17px Inter, system-ui, sans-serif';
+  ctx.fillText(clipText(personLabel(person), width - 112), left + 94, y + 24);
+  ctx.fillStyle = '#9b7888';
+  ctx.font = '700 12px Inter, system-ui, sans-serif';
+  const details = [person.instagram, person.birthDate ? formatBirthDate(person.birthDate) : 'nova pessoa na linha'].filter(Boolean).join(' • ');
+  ctx.fillText(clipText(details || 'apareceu pela primeira vez na LoveLine', width - 112), left + 94, y + 49);
+  ctx.fillStyle = colors[0];
+  ctx.font = '800 11px Inter, system-ui, sans-serif';
+  ctx.fillText('primeira aparição', left + 94, y + 69);
   ctx.restore();
 }
 
@@ -434,12 +645,14 @@ function drawHelp(lineY) {
   ctx.textAlign = 'center';
   ctx.fillStyle = '#b58a9c';
   ctx.font = '600 14px Inter, system-ui, sans-serif';
-  ctx.fillText('clique na linha para criar um ponto • segure e arraste para criar um período • botão direito arrasta a câmera • scroll controla o zoom', canvasRect.width / 2, lineY + 84);
+  ctx.fillText('clique na linha para criar um ponto • segure e arraste na linha para criar um período • botão direito arrasta a câmera', canvasRect.width / 2, lineY + 92);
+  ctx.fillText('para ligar pessoa: clique na bolinha da pessoa e depois clique em um evento ou período', canvasRect.width / 2, lineY + 116);
   ctx.restore();
 }
 
 function handleCanvasPointerDown(event) {
   if (!state.opened) return;
+  if (state.dragPerson) return;
   canvasRect = els.canvas.getBoundingClientRect();
   const pos = pointerPos(event);
   const hit = hitTestItem(pos.x, pos.y);
@@ -546,15 +759,38 @@ function handleWheel(event) {
   const pos = pointerPos(event);
   const beforeMs = screenToDate(pos.x);
   const zoomFactor = event.deltaY < 0 ? 1.13 : 0.88;
-  state.camera.pixelsPerDay = clamp(state.camera.pixelsPerDay * zoomFactor, 0.025, 80);
+  state.zoomPreset = null;
+  updateZoomPresetButtons();
+  state.camera.pixelsPerDay = clamp(state.camera.pixelsPerDay * zoomFactor, 0.04, 80);
   const afterMs = screenToDate(pos.x);
   state.camera.centerMs += beforeMs - afterMs;
   requestDraw();
 }
 
+function setZoomPreset(preset) {
+  const presets = {
+    day: 56,
+    week: 12,
+    month: 1.9,
+    year: 0.18
+  };
+  if (!presets[preset]) return;
+  state.zoomPreset = preset;
+  state.camera.pixelsPerDay = presets[preset];
+  updateZoomPresetButtons();
+  requestDraw();
+}
+
+function updateZoomPresetButtons() {
+  els.zoomControls?.querySelectorAll('[data-zoom-preset]').forEach((button) => {
+    button.classList.toggle('active', button.dataset.zoomPreset === state.zoomPreset);
+  });
+}
+
 function handleGlobalPointerMove(event) {
   if (!state.dragPerson) return;
   event.preventDefault();
+  canvasRect = els.canvas.getBoundingClientRect();
   state.dragPerson.x = event.clientX;
   state.dragPerson.y = event.clientY;
   state.dragPerson.ghost.style.left = `${event.clientX - 26}px`;
@@ -568,6 +804,8 @@ function handleGlobalPointerMove(event) {
 
 function handleGlobalPointerUp(event) {
   if (!state.dragPerson) return;
+  event.preventDefault();
+  canvasRect = els.canvas.getBoundingClientRect();
   const drag = state.dragPerson;
   drag.ghost.remove();
   const localX = event.clientX - canvasRect.left;
@@ -580,6 +818,7 @@ function handleGlobalPointerUp(event) {
   }
   state.dragPerson = null;
   state.hoverItemId = null;
+  state.suppressNextClick = true;
   requestDraw();
 }
 
@@ -620,40 +859,16 @@ function renderPeopleDropdown() {
       button.textContent = initials(personLabel(person));
     }
 
-    let startX = 0;
-    let startY = 0;
-    let moved = false;
-
-    button.addEventListener('pointerdown', (event) => {
+    button.addEventListener('click', (event) => {
+      event.preventDefault();
       event.stopPropagation();
-      startX = event.clientX;
-      startY = event.clientY;
-      moved = false;
-      button.setPointerCapture(event.pointerId);
+      startHoldingPerson(person.id, event.clientX, event.clientY);
     });
 
-    button.addEventListener('pointermove', (event) => {
-      const distance = Math.hypot(event.clientX - startX, event.clientY - startY);
-      if (distance < 8 || state.dragPerson) return;
-      moved = true;
-      const ghost = document.createElement('div');
-      ghost.className = 'drag-ghost';
-      ghost.style.background = gradient(person.colors);
-      ghost.style.left = `${event.clientX - 26}px`;
-      ghost.style.top = `${event.clientY - 26}px`;
-      const photoAsset = getAsset(person.profileImageId);
-      if (photoAsset) {
-        ghost.style.backgroundImage = `url(${photoAsset.dataUrl})`;
-        ghost.style.backgroundSize = 'cover';
-        ghost.style.backgroundPosition = 'center';
-      }
-      els.app.appendChild(ghost);
-      state.dragPerson = { personId: person.id, ghost, x: event.clientX, y: event.clientY };
-    });
-
-    button.addEventListener('pointerup', (event) => {
+    button.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
       event.stopPropagation();
-      if (!moved && !state.dragPerson) openPersonPanel(person.id);
+      openPersonDetailsPanel(person.id);
     });
 
     els.peopleDropdown.appendChild(button);
@@ -671,6 +886,31 @@ function renderPeopleDropdown() {
   els.peopleDropdown.appendChild(add);
 }
 
+function startHoldingPerson(personId, clientX, clientY) {
+  const person = getPerson(personId);
+  if (!person) return;
+  if (state.dragPerson?.ghost) state.dragPerson.ghost.remove();
+  const ghost = document.createElement('div');
+  ghost.className = 'drag-ghost held';
+  ghost.style.background = gradient(person.colors);
+  ghost.style.left = `${clientX - 26}px`;
+  ghost.style.top = `${clientY - 26}px`;
+  const photoAsset = getAsset(person.profileImageId);
+  if (photoAsset) {
+    ghost.style.backgroundImage = `url(${photoAsset.dataUrl})`;
+    ghost.style.backgroundSize = 'cover';
+    ghost.style.backgroundPosition = 'center';
+  } else {
+    ghost.textContent = initials(personLabel(person));
+  }
+  els.app.appendChild(ghost);
+  state.dragPerson = { personId: person.id, ghost, x: clientX, y: clientY };
+  state.hoverItemId = null;
+  closePeopleDropdown();
+  toast(`Clique em um evento ou período para ligar ${personLabel(person)}.`);
+  requestDraw();
+}
+
 function openPersonPanel(personId) {
   closePeopleDropdown();
   const original = personId ? getPerson(personId) : null;
@@ -681,100 +921,96 @@ function openPersonPanel(personId) {
 }
 
 function renderPersonPanel(person, editing) {
+  person.metrics ||= [];
+  person.galleryIds ||= [];
+  person.colors ||= [...COLOR_PAIRS[0]];
   const profile = getAsset(person.profileImageId);
   els.panelContent.innerHTML = `
     <div class="panel-head">
       <div>
         <h2 class="panel-title">${editing ? 'Editar pessoa' : 'Adicionar pessoa'}</h2>
-        <p class="panel-subtitle">Crie a pessoa que poderá ser arrastada para eventos e períodos.</p>
+        <p class="panel-subtitle">Monte a ficha da pessoa e use a bolinha dela para ligar eventos e períodos.</p>
       </div>
       <button class="icon-close" type="button" data-action="close">×</button>
     </div>
 
-    <div class="form-grid">
-      <div class="field">
-        <label>Foto de perfil</label>
-        <div class="file-box">
-          <div class="preview-avatar" id="personAvatarPreview" style="background:${gradient(person.colors)}">${profile ? `<img src="${profile.dataUrl}" alt="Foto de perfil" />` : initials(personLabel(person))}</div>
-          <input id="personProfile" type="file" accept="image/*" />
+    <div class="form-grid person-form">
+      <div class="person-editor-hero">
+        <div class="preview-avatar big" id="personAvatarPreview" style="background:${gradient(person.colors)}">${profile ? `<img src="${profile.dataUrl}" alt="Foto de perfil" />` : initials(personLabel(person))}</div>
+        <div class="field">
+          <label>Nome com ícone</label>
+          <input id="personFullName" value="${escapeAttr(person.fullName)}" placeholder="Ex: Ana Clara Souza" />
+          <input id="personProfile" class="native-file-input" type="file" accept="image/*" />
+          <label class="file-picker-btn compact" for="personProfile">Trocar ícone/foto</label>
         </div>
       </div>
 
       <div class="field">
-        <label>Nome completo</label>
-        <input id="personFullName" value="${escapeAttr(person.fullName)}" placeholder="Ex: Ana Clara Souza" />
-      </div>
-
-      <div class="field inline">
-        <div>
-          <label>Apelido</label>
-          <input id="personNickname" value="${escapeAttr(person.nickname)}" placeholder="Ex: Aninha" />
-        </div>
-        <div>
-          <label>Data de nascimento</label>
-          <input id="personBirthDate" type="date" value="${escapeAttr(person.birthDate)}" />
-        </div>
-      </div>
-
-      <div class="field inline">
-        <div>
-          <label>Idade automática</label>
-          <input id="personAge" value="${person.birthDate ? ageFromDate(person.birthDate) + ' anos' : ''}" disabled placeholder="Calculada pela data" />
-        </div>
-        <div>
-          <label>Instagram</label>
-          <input id="personInstagram" value="${escapeAttr(person.instagram)}" placeholder="@usuario" />
-        </div>
+        <label>Apelido</label>
+        <input id="personNickname" value="${escapeAttr(person.nickname)}" placeholder="Ex: Aninha" />
       </div>
 
       <div class="field">
-        <label>Cores da pessoa</label>
-        <div class="color-pair-row">
+        <label>Instagram</label>
+        <input id="personInstagram" value="${escapeAttr(person.instagram)}" placeholder="@usuario" />
+      </div>
+
+      <div class="field">
+        <label>Data de nascimento</label>
+        <input id="personBirthDate" type="date" value="${escapeAttr(person.birthDate)}" />
+      </div>
+
+      <div class="panel-section">
+        <div class="metric-head">
+          <strong>Cores da pessoa</strong>
+          <button class="secondary-btn small" type="button" data-action="shuffle-colors">Sugestão</button>
+        </div>
+        <div class="color-pair-row clean">
           <input id="personColorA" type="color" value="${person.colors[0]}" />
           <input id="personColorB" type="color" value="${person.colors[1]}" />
-          <button class="secondary-btn" type="button" data-action="shuffle-colors">Sugestão</button>
         </div>
         <div class="color-suggestions">
           ${COLOR_PAIRS.map((pair, index) => `<button class="color-chip" type="button" data-color-index="${index}" style="background:${gradient(pair)}" title="Usar combinação"></button>`).join('')}
         </div>
       </div>
 
-      <div class="field">
-        <label>Banco de fotos com a pessoa</label>
-        <div class="file-box">
-          <input id="personGalleryInput" type="file" accept="image/*" multiple />
-          <div id="personGallery" class="gallery-grid">${galleryHtml(person.galleryIds)}</div>
-        </div>
-      </div>
-
-      <div class="metric-block">
+      <div class="panel-section">
         <div class="metric-head">
           <strong>Campos adicionais</strong>
         </div>
-        <div class="field inline">
+        <div class="field inline metric-add-row">
           <select id="defaultMetricSelect">
             ${DEFAULT_METRICS.map((metric) => `<option value="${escapeAttr(metric)}">${escapeHtml(metric)}</option>`).join('')}
           </select>
           <button class="secondary-btn" type="button" data-action="add-default-metric">Adicionar campo</button>
         </div>
-        <div id="metricsList" class="form-grid" style="margin-top:12px;">${metricsHtml(person.metrics)}</div>
+        <div id="metricsList" class="form-grid metric-list">${metricsHtml(person.metrics)}</div>
       </div>
 
-      <div class="metric-block">
+      <div class="panel-section">
         <div class="metric-head">
           <strong>Campo personalizado</strong>
         </div>
-        <div class="field inline">
+        <div class="field inline metric-add-row">
           <input id="customMetricName" placeholder="Texto do campo" />
-          <input id="customMetricValue" type="number" placeholder="Valor numérico" />
+          <input id="customMetricValue" type="number" placeholder="Valor" />
         </div>
         <button class="secondary-btn" type="button" data-action="add-custom-metric" style="margin-top:10px;">Criar personalizado</button>
       </div>
 
-      <div class="help-note">Depois de criar a pessoa, abra o botão de pessoas no canto superior direito e arraste a bolinha dela para cima de qualquer ponto ou período.</div>
+      <div class="panel-section">
+        <div class="metric-head">
+          <strong>Banco de imagens</strong>
+          <input id="personGalleryInput" class="native-file-input" type="file" accept="image/*" multiple />
+          <label class="file-picker-btn small" for="personGalleryInput">Adicionar imagens</label>
+        </div>
+        <div id="personGallery" class="gallery-grid roomy">${galleryHtml(person.galleryIds)}</div>
+      </div>
+
+      <div class="help-note">Clique na bolinha da pessoa para pegá-la; depois clique em um evento ou período para ligar a pessoa nele. Botão direito na bolinha abre a análise.</div>
 
       <div class="action-row">
-        <button class="primary-btn" type="button" data-action="save-person">Salvar pessoa</button>
+        <button class="primary-btn" type="button" data-action="save-person">${editing ? 'Salvar edição' : 'Criar pessoa'}</button>
         ${editing ? '<button class="danger-btn" type="button" data-action="delete-person">Apagar pessoa</button>' : ''}
       </div>
     </div>
@@ -786,8 +1022,6 @@ function renderPersonPanel(person, editing) {
     person.birthDate = value('personBirthDate');
     person.instagram = value('personInstagram');
     person.colors = [value('personColorA') || '#ff82b2', value('personColorB') || '#ffc9df'];
-    const age = document.getElementById('personAge');
-    if (age) age.value = person.birthDate ? `${ageFromDate(person.birthDate)} anos` : '';
     const avatar = document.getElementById('personAvatarPreview');
     if (avatar) {
       const asset = getAsset(person.profileImageId);
@@ -886,6 +1120,88 @@ function renderPersonPanel(person, editing) {
   });
 }
 
+function openPersonDetailsPanel(personId) {
+  closePeopleDropdown();
+  const person = getPerson(personId);
+  if (!person) return;
+  state.activePanel = { type: 'person-details', id: personId };
+  els.panel.classList.add('open');
+  renderPersonDetailsPanel(person);
+}
+
+function renderPersonDetailsPanel(person) {
+  const profile = getAsset(person.profileImageId);
+  els.panelContent.innerHTML = `
+    <div class="panel-head">
+      <div>
+        <h2 class="panel-title">Analisar pessoa</h2>
+        <p class="panel-subtitle">Ficha rápida da pessoa selecionada.</p>
+      </div>
+      <button class="icon-close" type="button" data-action="close">×</button>
+    </div>
+
+    <div class="person-detail-card">
+      <div class="person-detail-hero">
+        <div class="preview-avatar big" style="background:${gradient(person.colors || COLOR_PAIRS[0])}">${profile ? `<img src="${profile.dataUrl}" alt="Foto de perfil" />` : initials(personLabel(person))}</div>
+        <div>
+          <h3>${escapeHtml(person.fullName || person.nickname || 'Pessoa sem nome')}</h3>
+          ${person.nickname ? `<p>${escapeHtml(person.nickname)}</p>` : ''}
+        </div>
+      </div>
+
+      <div class="detail-list">
+        <div><span>Apelido</span><strong>${escapeHtml(person.nickname || '—')}</strong></div>
+        <div><span>Instagram</span><strong>${escapeHtml(person.instagram || '—')}</strong></div>
+        <div><span>Data de nascimento</span><strong>${person.birthDate ? formatBirthDate(person.birthDate) : '—'}</strong></div>
+      </div>
+    </div>
+
+    <div class="panel-section">
+      <div class="metric-head"><strong>Campos + valores</strong></div>
+      <div class="metric-view-list">${metricsViewHtml(person.metrics)}</div>
+    </div>
+
+    <div class="panel-section">
+      <div class="metric-head"><strong>Banco de imagens</strong></div>
+      <div class="gallery-grid roomy readonly">${galleryViewHtml(person.galleryIds)}</div>
+    </div>
+
+    <div class="action-row">
+      <button class="primary-btn" type="button" data-action="edit-person">Editar pessoa</button>
+      <button class="secondary-btn" type="button" data-action="close">Fechar</button>
+    </div>
+  `;
+
+  bindPanelAction('close', closePanel);
+  bindPanelAction('edit-person', () => openPersonPanel(person.id));
+}
+
+function metricsViewHtml(metrics = []) {
+  if (!metrics.length) return '<div class="help-note">Nenhum campo adicional cadastrado.</div>';
+  return metrics.map((metric) => `
+    <div class="metric-view-row">
+      <span>${escapeHtml(metric.label)}</span>
+      <strong>${escapeHtml(metric.value ?? 0)}</strong>
+    </div>
+  `).join('');
+}
+
+function galleryViewHtml(ids = []) {
+  if (!ids.length) return '<div class="help-note">Nenhuma imagem no banco ainda.</div>';
+  return ids.map((id) => {
+    const asset = getAsset(id);
+    if (!asset) return '';
+    return `<div class="gallery-item"><img src="${asset.dataUrl}" alt="Foto" /></div>`;
+  }).join('');
+}
+
+function formatBirthDate(input) {
+  if (!input) return '';
+  const [year, month, day] = input.split('-').map(Number);
+  if (!year || !month || !day) return escapeHtml(input);
+  return `${pad(day)}/${pad(month)}/${year}`;
+}
+
 function makeEmptyPerson() {
   const pair = COLOR_PAIRS[state.people.length % COLOR_PAIRS.length];
   return {
@@ -944,9 +1260,10 @@ function renderItemPanel(item) {
 
       <div class="field">
         <label>Imagem ícone</label>
-        <div class="file-box">
+        <div class="file-box horizontal">
           <div class="event-icon-preview" id="itemIconPreview">${icon ? `<img src="${icon.dataUrl}" alt="Ícone do item" />` : '♡'}</div>
-          <input id="itemIconInput" type="file" accept="image/*" />
+          <input id="itemIconInput" class="native-file-input" type="file" accept="image/*" />
+          <label class="file-picker-btn" for="itemIconInput">Escolher ícone</label>
         </div>
       </div>
 
@@ -958,8 +1275,9 @@ function renderItemPanel(item) {
       <div class="field">
         <label>Banco de imagens próprio</label>
         <div class="file-box">
-          <input id="itemGalleryInput" type="file" accept="image/*" multiple />
-          <div id="itemGallery" class="gallery-grid">${galleryHtml(item.galleryIds)}</div>
+          <input id="itemGalleryInput" class="native-file-input" type="file" accept="image/*" multiple />
+          <label class="file-picker-btn" for="itemGalleryInput">Adicionar imagens</label>
+          <div id="itemGallery" class="gallery-grid roomy">${galleryHtml(item.galleryIds)}</div>
         </div>
       </div>
 
@@ -1029,8 +1347,9 @@ function closePeopleDropdown() {
 }
 
 function bindPanelAction(action, fn) {
-  const el = els.panelContent.querySelector(`[data-action="${action}"]`);
-  if (el) el.addEventListener('click', fn);
+  els.panelContent.querySelectorAll(`[data-action="${action}"]`).forEach((el) => {
+    el.addEventListener('click', fn);
+  });
 }
 
 function bindMetrics(person) {
@@ -1201,7 +1520,7 @@ function playTimeline() {
   state.playMoments = moments;
   state.playIndex = 0;
   playNextMoment();
-  state.playTimer = window.setInterval(playNextMoment, 1500);
+  state.playTimer = window.setInterval(playNextMoment, 1750);
 }
 
 function playNextMoment() {
@@ -1228,14 +1547,22 @@ function stopPlayback() {
 
 function buildPlaybackMoments() {
   const moments = [];
-  for (const item of state.items) {
-    if (item.type === 'event') moments.push({ itemId: item.id, ms: item.startMs, label: 'evento' });
+  const seenPeople = new Set();
+  const sortedItems = [...state.items].sort((a, b) => (a.startMs || 0) - (b.startMs || 0));
+  let order = 0;
+
+  for (const item of sortedItems) {
+    if (item.personId && !seenPeople.has(item.personId)) {
+      seenPeople.add(item.personId);
+      moments.push({ kind: 'person', personId: item.personId, itemId: item.id, ms: item.startMs, label: 'primeira aparição', order: order++ });
+    }
+    if (item.type === 'event') moments.push({ kind: 'item', itemId: item.id, ms: item.startMs, label: 'evento', order: order++ });
     if (item.type === 'period') {
-      moments.push({ itemId: item.id, ms: item.startMs, label: 'início' });
-      moments.push({ itemId: item.id, ms: item.endMs || item.startMs, label: 'fim' });
+      moments.push({ kind: 'item', itemId: item.id, ms: item.startMs, label: 'início do período', order: order++ });
+      moments.push({ kind: 'item', itemId: item.id, ms: item.endMs || item.startMs, label: 'fim do período', order: order++ });
     }
   }
-  return moments.sort((a, b) => a.ms - b.ms);
+  return moments.sort((a, b) => a.ms - b.ms || a.order - b.order);
 }
 
 function animateCameraTo(targetMs, duration) {
@@ -1253,19 +1580,21 @@ function animateCameraTo(targetMs, duration) {
 }
 
 function hitTestItem(x, y, padding = 20) {
-  const lineY = getLineY();
-  for (let i = state.items.length - 1; i >= 0; i -= 1) {
-    const item = state.items[i];
-    if (item.type === 'event') {
-      const itemX = dateToScreen(item.startMs);
-      if (Math.hypot(x - itemX, y - lineY) <= 22 + padding) return item;
+  const layouts = computeItemLayouts(getLineY());
+  const sorted = [...state.items].reverse();
+  for (const item of sorted) {
+    const layout = layouts.get(item.id);
+    if (!layout) continue;
+    if (layout.type === 'event') {
+      const radius = (layout.r || 16) + padding;
+      const nearBall = Math.hypot(x - layout.x, y - layout.y) <= radius;
+      const nearCable = Math.abs(x - layout.x) <= 8 + padding / 3 && y >= layout.y && y <= getLineY();
+      if (nearBall || nearCable) return item;
     } else {
-      const x1 = dateToScreen(item.startMs);
-      const x2 = dateToScreen(item.endMs || item.startMs);
-      const left = Math.min(x1, x2) - padding;
-      const right = Math.max(x1, x2) + padding;
-      const top = lineY - 24 - padding;
-      const bottom = lineY + 24 + padding;
+      const left = Math.min(layout.x1, layout.x2, layout.left) - padding;
+      const right = Math.max(layout.x1, layout.x2, layout.right) + padding;
+      const top = layout.y - padding;
+      const bottom = getLineY() + padding * 0.4;
       if (x >= left && x <= right && y >= top && y <= bottom) return item;
     }
   }
@@ -1273,14 +1602,14 @@ function hitTestItem(x, y, padding = 20) {
 }
 
 function getTickMode(scale) {
-  if (scale >= 34) return { kind: 'day', every: 1 };
-  if (scale >= 18) return { kind: 'day', every: 2 };
-  if (scale >= 6) return { kind: 'week', every: 1 };
-  if (scale >= 2.2) return { kind: 'week', every: 2 };
-  if (scale >= 0.45) return { kind: 'month', every: 1 };
-  if (scale >= 0.16) return { kind: 'month', every: 3 };
-  if (scale >= 0.055) return { kind: 'year', every: 1 };
-  if (scale >= 0.025) return { kind: 'year', every: 5 };
+  if (scale >= 48) return { kind: 'day', every: 1 };
+  if (scale >= 24) return { kind: 'day', every: 2 };
+  if (scale >= 10) return { kind: 'week', every: 1 };
+  if (scale >= 4.2) return { kind: 'week', every: 2 };
+  if (scale >= 1.1) return { kind: 'month', every: 1 };
+  if (scale >= 0.36) return { kind: 'month', every: 3 };
+  if (scale >= 0.11) return { kind: 'year', every: 1 };
+  if (scale >= 0.04) return { kind: 'year', every: 5 };
   return { kind: 'year', every: 10 };
 }
 
@@ -1295,7 +1624,8 @@ function isNearLine(y, distance = 48) {
 }
 
 function getLineY() {
-  return canvasRect.height / 2;
+  if (!canvasRect.height) return 360;
+  return clamp(canvasRect.height * 0.64, Math.min(300, canvasRect.height * 0.58), Math.max(220, canvasRect.height - 150));
 }
 
 function dateToScreen(ms) {
